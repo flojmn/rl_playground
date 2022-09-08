@@ -12,7 +12,7 @@ All algorithms in this repository are built on Pytorch.
 * OpenAI Gym Version 0.26
 
 ## Authors
-[@flojmn]
+[@flojmn](https://github.com/flojmn)
 
 
 
