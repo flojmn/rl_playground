@@ -43,7 +43,7 @@ class REINFORCEAgent:
 
     def get_action(self, state):
 
-        state = torch.from_numpy(state)
+        state = torch.Tensor(state)
         action, log_prob = self.actor(state)
         return action, log_prob
 
@@ -80,7 +80,7 @@ def main():
     gamma = 0.9
 
     # Environment
-    env = gym.make("CartPole-v1", new_step_api=True)
+    env = gym.make("CartPole-v1")
     obs_space = env.observation_space.shape[0]
     act_space = env.action_space.n
 
@@ -93,7 +93,7 @@ def main():
 
     for ep in range(max_epochs):
 
-        state = env.reset()
+        state, _ = env.reset()
 
         rewards = []
         logprobs = []
