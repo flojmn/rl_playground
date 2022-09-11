@@ -8,6 +8,7 @@ from torch.utils.tensorboard import SummaryWriter
 import numpy as np
 from collections import deque
 import copy
+from datetime import datetime
 
 # Actor Net
 class Actor(nn.Module):
@@ -43,7 +44,7 @@ class Critic(nn.Module):
         x = F.relu(self.linear1(torch.cat((s, a), dim=1)))
         x = F.relu(self.linear2(x))
         x = self.linear3(x)
-        return x
+        return x.squeeze()
 
 
 # Replay Buffer
@@ -137,7 +138,8 @@ class SAC(object):
         self.models_path = os.path.join(os.path.dirname(__file__), "models")
 
         # Path for logging files
-        self.log_path = os.path.join(os.path.dirname(__file__), "logs")
+        now = datetime.now()
+        self.log_path = os.path.join(os.path.dirname(__file__), "logs", str(now))
 
         # Initialize Summarywriter
         self.writer = SummaryWriter(log_dir=self.log_path)
@@ -151,35 +153,10 @@ class SAC(object):
         # Forward Pass in Actor Network
         mean, std = self.actor.forward(state)
 
-        m = Normal(mean, std + self.eps)
-        action = m.sample()
-        log_prob = m.log_prob(action)
-        log_prob = log_prob.sum()
-
-        action = 2 * F.softsign(action)
-        action = action.numpy()
-
-        return action, log_prob
-
-    def get_diff_action(self, state):
-        # Action differentiable wrt the actor network parameters
-        # We use the reparametrization trick
-
-        # Check if state is tensor, else transform it to a Tensor
-        if not torch.is_tensor(state):
-            state = torch.FloatTensor(state)
-
-        # Forward Pass in Actor Network
-        mean, std = self.actor.forward(state)
-
-        # Gaussian Noise
-        zeta = np.random.normal(loc=0, scale=1, size=self.action_dim)
-        zeta = torch.FloatTensor(zeta)
-
-        action = mean + std + zeta
-        m = Normal(mean, std + self.eps)
-        log_prob = m.log_prob(action)
-        action = 2 * F.softsign(action)
+        dist = Normal(mean, std)
+        action_raw = dist.rsample()
+        action = F.softsign(action_raw)
+        log_prob = dist.log_prob(action_raw) - torch.log(1 - action.pow(2) + self.eps)
 
         return action, log_prob
 
@@ -195,6 +172,22 @@ class SAC(object):
                 done = trunc or term
                 self.memory.add(state, action, reward, observation, done)
                 state = observation
+
+    def rollout(self):
+        # Rollout
+        state, _ = self.env.reset()
+        done = False
+        sum_reward = 0
+        while not done:
+            action, _ = self.get_action(state)
+            action = action.detach().numpy()
+            observation, reward, trunc, term, _ = self.env.step(action)
+            done = trunc or term
+            self.memory.add(state, action, reward, observation, done)
+            sum_reward += reward
+            state = observation
+
+        return sum_reward
 
     def train(self):
         # Perform Training
@@ -215,7 +208,7 @@ class SAC(object):
 
                 self.writer.add_scalar(
                     "Rollout/Reward",
-                    sum_reward_rollout / self.n_rollouts,
+                    reward,
                     countr_rolloutloops,
                 )
 
@@ -228,7 +221,7 @@ class SAC(object):
                 ep,
             )
 
-            # Average Reward over last 50 Training Rollouts
+            # Average Reward over last ... Training Rollouts
             self.writer.add_scalar(
                 "Training/Avg. Reward Rollouts",
                 sum(reward_history_rollout) / len(reward_history_rollout),
@@ -256,28 +249,32 @@ class SAC(object):
                 # Convert batch from numpy arrays to tensors
                 state_batch = torch.FloatTensor(state_batch)
                 action_batch = torch.FloatTensor(action_batch)
-                reward_batch = torch.FloatTensor(reward_batch)
+                reward_batch = torch.FloatTensor(reward_batch).squeeze()
                 next_state_batch = torch.FloatTensor(next_state_batch)
-                done_batch = torch.FloatTensor(done_batch)
-
-                # Action based on current policy calculated on next state
-                action_tilde_dash, log_prob_tilde_dash = self.actor(next_state_batch)
-
-                # Q values given next state and action based on current policy
-                Q_tar_1 = self.critic_target_1(next_state_batch, action_tilde_dash)
-                Q_tar_2 = self.critic_target_2(next_state_batch, action_tilde_dash)
+                done_batch = torch.FloatTensor(done_batch).squeeze()
 
                 # Line 12 (https://spinningup.openai.com/en/latest/algorithms/sac.html#pseudocode)
-                # Target Q
                 with torch.no_grad():
+                    # Action based on current policy calculated on next state
+                    action_tilde_dash, log_prob_tilde_dash = self.get_action(
+                        next_state_batch
+                    )
+
+                    log_prob_tilde_dash = torch.sum(log_prob_tilde_dash, 1)
+
+                    # Q values given next state and action based on current policy
+                    Q_tar_1 = self.critic_target_1(next_state_batch, action_tilde_dash)
+                    Q_tar_2 = self.critic_target_2(next_state_batch, action_tilde_dash)
+
+                    # Target Q
                     y = reward_batch + self.gamma * (1 - done_batch) * (
                         torch.minimum(Q_tar_1, Q_tar_2)
                         - self.alpha * log_prob_tilde_dash
                     )
 
                 # Line 13 (https://spinningup.openai.com/en/latest/algorithms/sac.html#pseudocode)
-                batch_Q_1 = self.critic_target_1(state_batch, action_batch)
-                batch_Q_2 = self.critic_target_2(state_batch, action_batch)
+                batch_Q_1 = self.critic_1(state_batch, action_batch)
+                batch_Q_2 = self.critic_2(state_batch, action_batch)
 
                 critic_loss_1 = F.mse_loss(y, batch_Q_1)
                 critic_loss_2 = F.mse_loss(y, batch_Q_2)
@@ -289,7 +286,9 @@ class SAC(object):
                 self.critic_2_optimizer.step()
 
                 # Line 14 (https://spinningup.openai.com/en/latest/algorithms/sac.html#pseudocode)
-                a_tilde_rep, log_prob_tilde_rep = self.get_diff_action(state_batch)
+                a_tilde_rep, log_prob_tilde_rep = self.get_action(state_batch)
+
+                log_prob_tilde_rep = torch.sum(log_prob_tilde_rep, 1)
 
                 current_Q_1 = self.critic_1(state_batch, a_tilde_rep)
                 current_Q_2 = self.critic_2(state_batch, a_tilde_rep)
@@ -332,21 +331,6 @@ class SAC(object):
 
                 countr_trainloops += 1
 
-    def rollout(self):
-        # Rollout
-        state, _ = self.env.reset()
-        done = False
-        sum_reward = 0
-        while not done:
-            action, _ = self.get_action(state)
-            observation, reward, trunc, term, _ = self.env.step(action)
-            done = trunc or term
-            self.memory.add(state, action, reward, observation, done)
-            sum_reward += reward
-            state = observation
-
-        return sum_reward
-
     def simulate(self):
         # Simulation
         state, _ = self.env.reset()
@@ -381,22 +365,23 @@ def main():
 
     # Define Hyperparameters
     params = {
-        "max_epochs": 10000,  # Maximum Training Epochs
-        "n_warmup": 1000,  # Number of Warmup Steps with random policy
+        "max_epochs": 100000,  # Maximum Training Epochs
+        "n_warmup": 5000,  # Number of Warmup Steps with random policy
         "lr_actor": 3e-4,  # Actor Learning Rate
         "lr_critic": 1e-3,  # Critc Learning Rate
-        "gamma": 0.995,  # Discount Factor
+        "gamma": 0.99,  # Discount Factor
         "tau": 0.05,  # Target Network Update Factor
-        "alpha": 0.05,  # Entropy Parameter
+        "alpha": 0.01,  # Entropy Parameter
         "buffer_size": 10000000,  # Total Replay Buffer Size
-        "batch_size": 32,  # Batch Size
+        "batch_size": 64,  # Batch Size
         "hidden_size": 32,  # Hidden Dim of NN
-        "n_rollouts": 5,  # Number ob rollout epochs before training
+        "n_rollouts": 1,  # Number ob rollout epochs before training
         "n_updates": 5,  # Number of Training Updates
     }
 
     # Create Environment
-    env = gym.make("Pendulum-v1", g=9.81)
+    # env = gym.make("Pendulum-v1", g=9.81)
+    env = gym.make("LunarLander-v2", continuous=True)
 
     # Initialize Agent
     agent = SAC(env, params)
