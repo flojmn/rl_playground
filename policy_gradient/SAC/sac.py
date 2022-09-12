@@ -366,12 +366,12 @@ def main():
     # Define Hyperparameters
     params = {
         "max_epochs": 100000,  # Maximum Training Epochs
-        "n_warmup": 5000,  # Number of Warmup Steps with random policy
+        "n_warmup": 10000,  # Number of Warmup Steps with random policy
         "lr_actor": 3e-4,  # Actor Learning Rate
         "lr_critic": 1e-3,  # Critc Learning Rate
         "gamma": 0.99,  # Discount Factor
-        "tau": 0.05,  # Target Network Update Factor
-        "alpha": 0.01,  # Entropy Parameter
+        "tau": 0.02,  # Target Network Update Factor
+        "alpha": 0.005,  # Entropy Parameter
         "buffer_size": 10000000,  # Total Replay Buffer Size
         "batch_size": 64,  # Batch Size
         "hidden_size": 32,  # Hidden Dim of NN
